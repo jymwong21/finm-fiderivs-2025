@@ -1,0 +1,22 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import statsmodels.api as sm
+from dateutil.relativedelta import relativedelta
+import datetime
+from scipy.optimize import minimize
+from scipy.optimize import newton
+from sklearn.decomposition import PCA
+import warnings
+warnings.filterwarnings("ignore")
+from scipy.stats import norm
+from scipy.optimize import newton
+from scipy.optimize import brentq
+from scipy.optimize import root_scalar
+from scipy.optimize import fsolve
+import sys
+import os
+current_dir = os.getcwd()
+sys.path.append(os.path.abspath(os.path.join(current_dir, '..')))
+import cmds.justin as justin
