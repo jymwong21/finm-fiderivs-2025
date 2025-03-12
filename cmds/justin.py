@@ -905,3 +905,265 @@ def calc_swaptions_across_strikes(T,implied_vols,forward_swap_rate,swaption_disc
 # Treasury Futures
 
 # Binomial Trees
+
+
+
+
+
+def construct_bond_cftree(T, compound, cpn, cpn_freq=2, face=100, drop_final_period=True):
+    """
+    Constructs a cash flow tree for a bond.
+
+    Parameters:
+    T (float): The maturity time of the bond.
+    compound (int): The compounding frequency per year.
+    cpn (float): The annual coupon rate of the bond.
+    cpn_freq (int, optional): The frequency of coupon payments per year. Default is 2.
+    face (float, optional): The face value of the bond. Default is 100.
+    drop_final_period (bool, optional): If True, the final period cash flow is dropped. Default is True.
+
+    Returns:
+    pd.DataFrame: A DataFrame representing the cash flow tree of the bond.
+    """
+    
+    def construct_rate_tree(dt, T):
+        """
+        Creates an empty tree with a time grid.
+
+        Parameters:
+        dt (float): The time step size.
+        T (float): The maturity time of the bond.
+
+        Returns:
+        pd.DataFrame: A DataFrame representing the empty rate tree.
+        """
+        timegrid = pd.Series((np.arange(0, round(T/dt) + 1) * dt).round(6), name='time', index=pd.Index(range(round(T/dt) + 1), name='state'))
+        tree = pd.DataFrame(dtype=float, columns=timegrid, index=timegrid.index)
+        return tree
+    
+    step = int(compound / cpn_freq)
+
+    cftree = construct_rate_tree(1 / compound, T)
+    cftree.iloc[:, :] = 0
+    cftree.iloc[:, -1:0:-step] = (cpn / cpn_freq) * face
+    
+    if drop_final_period:
+        # Final cash flow is accounted for in payoff function
+        # Drop final period cash flow from cash flow tree
+        cftree = cftree.iloc[:-1, :-1]
+    else:
+        cftree.iloc[:, -1] += face
+        
+    return cftree
+
+def construct_accint(timenodes, freq, cpn, cpn_freq=2, face=100):
+    """
+    Constructs the accrued interest for a bond over given time nodes.
+
+    Parameters:
+    timenodes (array-like): The time nodes at which to calculate accrued interest.
+    freq (int): The frequency of compounding per year.
+    cpn (float): The annual coupon rate of the bond.
+    cpn_freq (int, optional): The frequency of coupon payments per year. Default is 2.
+    face (float, optional): The face value of the bond. Default is 100.
+
+    Returns:
+    pd.Series: A Series representing the accrued interest at each time node.
+    """
+    
+    mod = freq / cpn_freq
+    cpn_pmnt = face * cpn / cpn_freq
+
+    temp = np.arange(len(timenodes)) % mod
+    # Shift to ensure end is considered coupon (not necessarily start)
+    temp = (temp - temp[-1] - 1) % mod
+    temp = cpn_pmnt * temp.astype(float) / mod
+
+    accint = pd.Series(temp, index=timenodes)
+
+    return accint
+
+import pandas as pd
+import numpy as np
+
+def compute_bond_price_tree(ratetree, cftree, face_value=100, coupon_rate=0.0441, coupon_freq=2):
+    """
+    Computes a tree of bond prices using backward induction, accounting for the final cash flow at maturity.
+
+    Parameters:
+    -----------
+    ratetree : pandas.DataFrame
+        A binomial tree of short-term interest rates (annualized).
+        
+    cftree : pandas.DataFrame
+        A matrix of bond cash flows at each time step (excluding final maturity payment).
+
+    face_value : float, default=100
+        The face value of the bond.
+
+    coupon_rate : float, default=0.0441
+        The bond's annual coupon rate (e.g., 0.0441 for 4.41%).
+
+    coupon_freq : int, default=2
+        The number of coupon payments per year (e.g., 2 for semiannual payments).
+
+    Returns:
+    --------
+    valuetree : pandas.DataFrame
+        A tree containing bond prices at each time step.
+    """
+    # Ensure the input trees have the same shape
+    assert ratetree.shape == cftree.shape, "Rate tree and cash flow tree must have the same shape."
+
+    # Time steps and interval
+    dt = ratetree.columns[1] - ratetree.columns[0]
+    final_timestep = cftree.columns[-1]  # Last available column (t = 4.75)
+
+    # Initialize the value tree with the same structure
+    valuetree = pd.DataFrame(dtype=float, index=ratetree.index, columns=ratetree.columns)
+
+    # Compute the final bond cash flow at maturity (t = 5)
+    final_cashflow = face_value + (coupon_rate / coupon_freq) * face_value  # 102.25
+    discount_factor_final = np.exp(-ratetree.iloc[:, -1] * dt)  # Discount using t=4.75 rate
+    valuetree.iloc[:, -1] = final_cashflow * discount_factor_final  # Discounted at t=4.75 rate
+
+    # Backward induction to compute bond prices
+    for t in reversed(range(len(valuetree.columns) - 1)):
+        time_col = valuetree.columns[t]
+        next_time_col = valuetree.columns[t + 1]
+
+        for state in range(len(valuetree.index) - 1):
+            p = 0.5  # Risk-neutral probability
+
+            # Expected future value (up and down states)
+            expected_value = (
+                p * valuetree.loc[state, next_time_col] + 
+                (1 - p) * valuetree.loc[state + 1, next_time_col]
+            )
+
+            # Discount at the current rate
+            discount_factor = np.exp(-ratetree.loc[state, time_col] * dt)
+
+            # Compute bond price as discounted expectation + coupon payment
+            valuetree.loc[state, time_col] = discount_factor * expected_value + cftree.loc[state, time_col]
+
+    return valuetree
+
+
+
+# def bond_price(face_value, coupon_rate, ytm, years_to_maturity):
+#     coupon_payment = (coupon_rate / 2) * face_value
+#     periods = years_to_maturity * 2
+#     price = sum([coupon_payment / (1 + ytm / 2) ** t for t in range(1, periods + 1)])
+#     price += face_value / (1 + ytm / 2) ** periods
+#     return price
+
+
+def bintree_pricing(payoff=None, ratetree=None, undertree=None, cftree=None, dt=None, pstars=None, timing=None, cfdelay=False, style='european', Tamerican=0, compounding=None):
+    """
+    Prices a derivative using a binomial tree model.
+
+    Parameters:
+    -----------
+    payoff : function, optional
+        A function that calculates the payoff of the derivative given the underlying rate.
+        
+    ratetree : pandas.DataFrame, optional
+        A binomial tree of short-term interest rates (annualized).
+        
+    undertree : pandas.DataFrame, optional
+        A binomial tree of the underlying asset prices. Defaults to ratetree if not provided.
+        
+    cftree : pandas.DataFrame, optional
+        A tree containing cash flows at each time step. Defaults to a zero cash flow tree if not provided.
+        
+    dt : float, optional
+        The time step size. If not provided, it is calculated from the columns of undertree.
+        
+    pstars : pandas.Series, optional
+        The risk-neutral probabilities at each time step. Defaults to 0.5 if not provided.
+        
+    timing : str, optional
+        The timing of cash flows. If 'deferred', cash flows are delayed by dt.
+        
+    cfdelay : bool, optional
+        If True, cash flows are delayed by dt. Defaults to False.
+        
+    style : str, optional
+        The option style. Can be 'european' or 'american'. Defaults to 'european'.
+        
+    Tamerican : int, optional
+        The time step at which American option exercise is allowed. Defaults to 0.
+        
+    compounding : int, optional
+        The compounding frequency. If provided, ratetree is converted to continuous rates.
+
+    Returns:
+    --------
+    valuetree : pandas.DataFrame
+        A tree containing the derivative prices at each time step.
+    """
+    
+    if payoff is None:
+        payoff = lambda r: 0
+    
+    if undertree is None:
+        undertree = ratetree
+        
+    if cftree is None:
+        cftree = pd.DataFrame(0, index=undertree.index, columns=undertree.columns)
+        
+    if pstars is None:
+        pstars = pd.Series(.5, index=undertree.columns)
+
+    if dt is None:
+        dt = undertree.columns.to_series().diff().mean()
+        dt = undertree.columns[1] - undertree.columns[0]
+    
+    if timing == 'deferred':
+        cfdelay = True
+    
+    if dt < .25 and cfdelay:
+        display('Warning: cfdelay setting only delays by dt.')
+        
+    if compounding is not None:
+        ratetree_cont = compounding * np.log(1 + ratetree / compounding)
+    else:
+        ratetree_cont = ratetree
+    
+    valuetree = pd.DataFrame(dtype=float, index=undertree.index, columns=undertree.columns)
+
+    for steps_back, t in enumerate(valuetree.columns[-1::-1]):
+        if steps_back == 0:                           
+            valuetree[t] = payoff(undertree[t])
+            if cfdelay:
+                valuetree[t] *= np.exp(-ratetree_cont[t] * dt)
+        else:
+            for state in valuetree[t].index[:-1]:
+                val_avg = pstars[t] * valuetree.iloc[state, -steps_back] + (1 - pstars[t]) * valuetree.iloc[state + 1, -steps_back]
+                
+                if cfdelay:
+                    cf = cftree.loc[state, t]
+                else:                    
+                    cf = cftree.iloc[state, -steps_back]
+                
+                valuetree.loc[state, t] = np.exp(-ratetree_cont.loc[state, t] * dt) * (val_avg + cf)
+
+            if style == 'american':
+                if t >= Tamerican:
+                    valuetree.loc[:, t] = np.maximum(valuetree.loc[:, t], payoff(undertree.loc[:, t]))
+        
+    return valuetree
+
+
+
+
+
+def payoff_bond(r,dt,facevalue=100):
+    price = np.exp(-r * dt) * facevalue
+    return price 
+
+
+def payoff_call(r, dt, facevalue=100, k=100):
+    price = np.maximum(np.exp(-r * dt) * facevalue - k, 0)
+    return price
